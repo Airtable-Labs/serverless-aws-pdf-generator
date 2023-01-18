@@ -1,0 +1,174 @@
+# Service name is used for resource (such as S3 bucket) naming and so it should be unique.
+# At least replace the ____ but you can also rename the whole service if you'd like
+service: ____-airtable-attachment-gen
+
+frameworkVersion: '3'
+configValidationMode: error
+
+package:
+  # Exclude these files from the Lambda packages
+  patterns:
+    - '!sample_events/**'
+    - 'docs/'
+
+provider:
+  name: aws
+  deploymentMethod: direct
+  deploymentBucket:
+    blockPublicAccess: true
+  stackTags:
+    createdBy: ${env:MY_WORK_EMAIL}
+  runtime: nodejs14.x
+  stage: ${opt:stage,'dev'} # default to 'dev' stage if none is specified
+  region: us-east-1
+  logRetentionInDays: 14
+  environment: # set all these environment variables for all Lambdas; not all are required for each function though
+    REGION: ${aws:region}
+    STAGE: ${self:provider.stage}
+    S3_BUCKET: ${self:resources.Resources.S3BucketForAssets.Properties.BucketName}
+    SECRET_MANAGER_SECRET_WITH_AIRTABLE_API_KEY: ${self:resources.Resources.SecretAirtableApiKey.Properties.Name} # "/${self:service}/${self:provider.stage}/AIRTABLE_API_KEY"
+    QUEUE_NAME: ${self:resources.Resources.WorkerQueue.Properties.QueueName}
+  iam:
+    role:
+      managedPolicies:
+        - "arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy"
+      statements:
+        - Effect: Allow
+          Action:
+            # For uploading files
+            - s3:PutObject
+            - s3:PutObjectAcl
+            # For generating presigned URLs
+            - s3:GetObject
+          Resource: 
+            Fn::Join:
+              - ""
+              - - Fn::GetAtt: [S3BucketForAssets, Arn]
+                - "/*"
+        - Effect: Allow
+          Action:
+            - sqs:GetQueueUrl
+            - sqs:SendMessage
+            - sqs:DeleteMessage
+            - sqs:ReceiveMessage
+          Resource:
+            - Fn::GetAtt: [WorkerQueue, Arn]
+            - Fn::GetAtt: [DeadLetterQueue, Arn]
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+          Resource: !Ref SecretAirtableApiKey
+  apiGateway:
+    apiKeys:
+      - firstApiKey
+    usagePlan:
+      throttle:
+        burstLimit: 20
+        rateLimit: 10 # requests per second
+
+functions:
+  processSynchronously:
+    handler: handlers.processJobSynchronously
+    timeout: 30 # seconds
+    events:
+      - http:
+          path: /sync
+          method: post
+          private: true
+    onError:
+      Fn::GetAtt: [DeadLetterQueue, Arn]
+    layers:
+      - arn:aws:lambda:us-east-1:580247275435:layer:LambdaInsightsExtension:21
+  enqueueJob:
+    handler: handlers.enqueueJobForAsyncQueue
+    timeout: 20 # seconds
+    events:
+      - http:
+          method: post
+          path: /async
+          private: true
+    onError:
+      Fn::GetAtt: [DeadLetterQueue, Arn]
+    layers:
+      - arn:aws:lambda:us-east-1:580247275435:layer:LambdaInsightsExtension:21
+  processJob:
+    handler: handlers.processJobFromQueue
+    timeout: 120 # two minutes
+    events:
+      - sqs:
+          batchSize: 1
+          arn:
+            Fn::GetAtt: [WorkerQueue, Arn]
+    onError:
+      Fn::GetAtt: [DeadLetterQueue, Arn]
+    layers:
+      - arn:aws:lambda:us-east-1:580247275435:layer:LambdaInsightsExtension:21
+
+
+resources:
+  Resources:
+    # S3 bucket for storing assets (separate from the bucket Serverless Framework creates)
+    S3BucketForAssets:
+      Type: AWS::S3::Bucket
+      Properties:
+        AccessControl: Private
+        BucketName: "${self:service}-${self:provider.stage}-assets"
+    # Worker queue which processes jobs from the processJob Lambda (which is fed by the enqueueJob Lambda) 
+    WorkerQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: "${self:service}-${self:provider.stage}-worker"
+        VisibilityTimeout: 120 # should be the same or more than the worker Lambda's timeout
+        RedrivePolicy: 
+          maxReceiveCount: 2
+          deadLetterTargetArn: 
+            Fn::GetAtt: [DeadLetterQueue, Arn]
+    DeadLetterQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-dead-letter
+        MessageRetentionPeriod: 1209600 # seconds (max value of 2 weeks)
+    # The next three resources (DeadLetterQueueTopic, DeadLetterQueueTopicSubscription, and DeadLetterQueueAlarm)
+    #  are modeled after https://fidelapi.com/blog/how-to-set-up-sqs-dead-letter-queues-with-alarm-notifications/
+    #  and setup an email notification to be sent when there is more than one message in the dead letter queue.
+    #  NOTE: You will only be notified when the Alarm transitions from "OK" to "In Alarm". Accordingly, you will
+    #  only be notified for the first message received (until you purge or successfully redrive the dead letter queue)
+    DeadLetterQueueTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        DisplayName: ${self:service}-${self:provider.stage}-dead-letter-topic
+        TopicName: ${self:service}-${self:provider.stage}-dead-letter-topic  
+    DeadLetterQueueTopicSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Endpoint: ${env:MY_WORK_EMAIL}
+        Protocol: email
+        TopicArn: !Ref DeadLetterQueueTopic
+    DeadLetterQueueAlarmWhenMessages:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${self:provider.stage}-dead-letter-messages
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions:
+          - Name: QueueName
+            Value: ${self:resources.Resources.DeadLetterQueue.Properties.QueueName}
+        Statistic: Sum
+        Period: 60 # seconds
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions: 
+          - !Ref DeadLetterQueueTopic
+    # Airtable API Key stored in AWS Secrets Manager. Do not set the value in this file. Manually go into AWS Secret Manager and set your API key there
+    # Personal access token with data.records:read, data.records:write, and schema.bases:read scopes recommended
+    SecretAirtableApiKey:
+      Type: "AWS::SecretsManager::Secret"
+      Properties:
+        Name: "/${self:service}/${self:provider.stage}/AIRTABLE_API_KEY"
+        Description: "STAGE=${self:provider.stage} | API key to authenticate with Airtable (https://airtable.com/developers/web/api/authentication) Personal access token with data.records:read, data.records:write, and schema.bases:read scopes recommended"
+        SecretString: initial value
+
+custom:
+  logRetentionInDays: 14

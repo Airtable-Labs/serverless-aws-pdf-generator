@@ -1,0 +1,36 @@
+{
+  "name": "msilverberg-static-attachment-gen",
+  "version": "1.0.0",
+  "description": "",
+  "main": "handler.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "deploy:dev": "serverless deploy --stage dev --verbose",
+    "deploy:sbx": "serverless deploy --stage sbx --verbose",
+    "invoke:local:sync": "serverless invoke local --function processSynchronously --path sample_events/apigw-post-sync.yml -e AWS_SDK_LOAD_CONFIG=1",
+    "invoke:live:sync": "serverless invoke --function processSynchronously --path sample_events/apigw-post-sync.yml",
+    "invoke:local:async": "serverless invoke local --function enqueueJob --path sample_events/apigw-post-async.yml -e AWS_SDK_LOAD_CONFIG=1",
+    "invoke:live:async": "serverless invoke --function enqueueJob --path sample_events/apigw-post-async.yml",
+    "lint": "standard",
+    "lint:fix": "standard --fix"
+  },
+  "keywords": [],
+  "author": "mark.silverberg@airtable.com",
+  "license": "ISC",
+  "dependencies": {
+    "fs-extra": "^11.1.0",
+    "node-fetch": "^2.6.7",
+    "pdfkit": "^0.13.0",
+    "pdfkit-table": "^0.1.99"
+  },
+  "devDependencies": {
+    "aws-sdk": "^2.1272.0",
+    "serverless": "^3.25.1",
+    "standard": "^16.0.3"
+  },
+  "standard": {
+    "ignore": [
+      "docs/"
+    ]
+  }
+}

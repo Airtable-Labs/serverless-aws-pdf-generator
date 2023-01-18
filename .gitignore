@@ -1,0 +1,8 @@
+# Dependencies
+node_modules
+
+# Serverless Framework
+.serverless
+
+# IDE
+.vscode

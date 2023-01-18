@@ -1,0 +1,12 @@
+path: /
+resource: /async
+httpMethod: POST
+body: |
+  {
+    "baseId": "appXXX",
+    "tableId": "tblXXX",
+    "recordId": "recXXX",
+    "targetAttachmentFieldNameOrId": "Generated PDF",
+    "viewId": "viwXXX"
+  }
+
